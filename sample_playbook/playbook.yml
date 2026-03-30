@@ -1,0 +1,193 @@
+---
+- name: Execute commands on selected Cisco devices
+  hosts: all
+  gather_facts: no
+  connection: network_cli
+
+  vars:
+    command_file: "commands.txt"
+    host_list_file: "hosts.txt"
+    interface_file: "interfaces.txt"
+    access_group_file: "access_groups.txt"
+    github_owner: "haaatchi27"
+    github_repo: "awx-sample-project"
+    repo_url: "https://github.com/haaatchi27/awx-sample-project.git"
+    repo_dest: "/tmp/repo"
+    planning_dir: "{{ repo_dest }}/planning"
+    configured_dir: "{{ repo_dest }}/configured"
+    # planning_dir: "{{ repo_dest }}/planning/{{ github_folder }}"
+    github_folder: "{{ github_folder}}"
+    commit_msg: "Move {{ github_folder }} from planning to configured."
+
+    git_user_name: "haaatchi27"
+    git_user_email: "vocaloid.hatchi@gmail.com"
+    github_personal_access_token: "{{ lookup('env', 'GITHUB_PAT') }}"
+    GITHUB_USERNAME: "{{ lookup('env', 'GITHUB_USERNAME') }}"
+    GITHUB_ACCESSTOKEN: "{{ lookup('env', 'GITHUB_ACCESSTOKEN') }}"
+
+  environment:
+    GIT_ASKPASS: "/bin/echo"
+    GITHUB_USERNAME: "{{ lookup('env', 'GITHUB_USERNAME') }}"
+    GITHUB_ACCESSTOKEN: "{{ lookup('env', 'GITHUB_ACCESSTOKEN') }}"
+
+  tasks:
+    - name: Clone the Git repository
+      git:
+        repo: "{{ repo_url }}"
+        dest: "{{ repo_dest }}"
+        version: HEAD
+
+
+    - name: Validate target folder exists
+      stat:
+        path: "{{ planning_dir }}/{{ github_folder }}"
+      register: target_folder_stat
+
+    - name: Exit if target folder does not exist
+      block:
+        - debug:
+            msg: "指定したディレクトリは存在しません。終了します。"
+        - meta: end_play
+      when: not target_folder_stat.stat.exists
+
+
+
+    - name: Set target folder name
+      set_fact:
+        target_folder: "{{ github_folder }}"
+
+    - debug:
+        msg: "Using target folder: {{ target_folder }}"
+
+
+
+    - name: Read host list
+      set_fact:
+        target_hosts: "{{ lookup('file', planning_dir + '/' + target_folder + '/' + host_list_file).splitlines() }}"
+
+    - debug:
+        msg: "Target hosts: {{ target_hosts }}"
+
+
+    - name: Read command list
+      set_fact:
+        command_list: "{{ lookup('file', planning_dir + '/' + target_folder + '/' + command_file).splitlines() }}"
+
+    - debug:
+        msg: "Command list: {{ command_list }}"
+
+
+    - name: Read interface list
+      set_fact:
+        interface_list: "{{ lookup('file', planning_dir + '/' + target_folder + '/' + interface_file).splitlines() }}"
+
+    - name: Read access-group list
+      set_fact:
+        access_group_list: "{{ lookup('file', planning_dir + '/' + target_folder + '/' + access_group_file).splitlines() }}"
+
+    - debug:
+        msg: "Interface list: {{ interface_list }}"
+
+    - debug:
+        msg: "Access-group list: {{ access_group_list }}"
+
+
+    - name: Skip hosts not in target list
+      debug:
+        msg: "Skipping {{ inventory_hostname }} - not in hosts.txt"
+      when: inventory_hostname not in target_hosts
+
+    - name: Execute commands on matched hosts
+      ios_config:
+        lines: "{{ command_list }}"
+      when: inventory_hostname in target_hosts
+
+    - debug:
+        msg: "Commands executed on {{ inventory_hostname }}"
+      when: inventory_hostname in target_hosts
+
+    # - name: Configure access-group on SVI interfaces
+    #   ios_config:
+    #     lines:
+    #       - "ip access-group {{ item.split()[1] }} {{ item.split()[2] }}"
+    #     parents: "interface {{ item.split()[0] }}"
+    #   loop: "{{ access_group_list }}"
+    #   when: inventory_hostname in target_hosts
+
+    # - debug:
+    #     msg: "Access-group configured on SVI interfaces for {{ inventory_hostname }}"
+    #   when: inventory_hostname in target_hosts
+
+    - name: Create full combination of interfaces and access-groups
+      set_fact:
+        interface_acl_pairs: "{{ interface_list | product(access_group_list) | list }}"
+  
+    - debug:
+        msg: "Interface-ACL pairs: {{ interface_acl_pairs }}"
+
+    - name: Configure access-group on SVI interfaces
+      ios_config:
+        parents: "interface {{ item.0 }}"
+        lines:
+          - "ip access-group {{ item.1.split()[0] }} {{ item.1.split()[1] }}"
+      loop: "{{ interface_acl_pairs }}"
+      when: inventory_hostname in target_hosts
+
+
+    # 設定完了
+
+    # - name: Ensure git is installed
+    #   apt:
+    #     name: git
+    #     state: present
+    #   when: ansible_os_family == "Debian"
+
+    # - name: Clone repository
+    #   git:
+    #     repo: "{{ repo_url }}"
+    #     dest: "{{ repo_dir }}"
+    #     version: main
+    #     accept_hostkey: yes
+
+    - name: Configure git user.name
+      command: git config user.name "{{ git_user_name }}"
+      args:
+        chdir: "{{ repo_dest }}"
+
+    - name: Configure git user.email
+      command: git config user.email "{{ git_user_email }}"
+      args:
+        chdir: "{{ repo_dest }}"
+
+    - name: Move file (git mv)
+      command: git mv "{{ planning_dir }}/{{ github_folder }}" "{{ configured_dir }}/"
+      args:
+        chdir: "{{ repo_dest }}"
+
+    - name: Commit changes
+      command: git commit -m "{{ commit_msg }}"
+      args:
+        chdir: "{{ repo_dest }}"
+
+    - debug:
+        msg: "GITHUB_ACCESSTOKEN: {{ GITHUB_ACCESSTOKEN }}"
+
+    # - name: Push changes
+    #   environment:
+    #     GIT_USERNAME: "{{ git_user_name }}"
+    #     GIT_PASSWORD: "{{ GITHUB_ACCESSTOKEN }}"
+
+    #   command: git push origin main
+    #   args:
+    #     chdir: "{{ repo_dest }}"
+
+
+    - name: Push changes with PAT
+      environment:
+        GIT_ASKPASS: "/bin/echo"
+        GITHUB_USERNAME: "{{ lookup('env', 'GITHUB_USERNAME') }}"
+        GITHUB_ACCESSTOKEN: "{{ lookup('env', 'GITHUB_ACCESSTOKEN') }}"
+      command: >
+        bash -c 'echo "$GITHUB_ACCESSTOKEN" | git push https://{{ lookup("env", "GITHUB_USERNAME") }}:{{ lookup('env', 'GITHUB_ACCESSTOKEN') }}@github.com/{{ github_owner }}/{{ github_repo }}.git main'
+      args:
+        chdir: "{{ repo_dest }}"
